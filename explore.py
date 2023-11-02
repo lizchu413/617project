@@ -3,10 +3,14 @@ import tqdm
 from pathlib import Path
 from dataclasses import dataclass
 
+# code taken from
+# https://pytorch.org/tutorials/intermediate/seq2seq_translation_tutorial.html
+
 import torch
 import torch.nn as nn
 from torch import optim
 import torch.nn.functional as F
+import random
 
 import numpy as np
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
@@ -18,20 +22,22 @@ plt.switch_backend('agg')
 import matplotlib.ticker as ticker
 import numpy as np
 
-def showPlot(points):
+def showPlot(train, test):
     plt.figure()
     fig, ax = plt.subplots()
     # this locator puts ticks at regular intervals
     # loc = ticker.MultipleLocator(base=0.2)
     # ax.yaxis.set_major_locator(loc)
-    plt.plot(points)
-    plt.savefig('picture.png')
-    plt.show()
+    plt.plot(train, label="train loss")
+    plt.plot(test, label="test loss")
+    plt.xlabel("epochs")
+    plt.ylabel("average negative log likelihood (NLL) loss")
+    plt.savefig('smol_exp_losses.png')
 
 seed = 10617
 np.random.seed(seed)
 
-MAX_LENGTH = 20
+MAX_LENGTH = 50
 EPOCHS = 10
 
 SOS_token = 0
@@ -194,7 +200,7 @@ if __name__ == "__main__":
      tr_decl, tt_decl, vd_decl, 
      tr_bodies, tt_bodies, vd_bodies) = data()
     n_tr, n_vd, n_tt = len(tr_desc), len(vd_desc), len(tt_desc)
-    print(f"training examples: {n_tr}; validation examples: {n_vd}, test examples: {n_tt}")
+    print(f"training examples: {n_tr}; validation examples: {n_vd}, test examples: {n_tt}\n")
 
     tr_x = [tr_decl[i] + " DCNL " + tr_bodies[i] for i in range(n_tr)]
     trainset = [[tr_x[i], tr_desc[i]] for i in range(n_tr)]
@@ -210,13 +216,13 @@ if __name__ == "__main__":
     trainset = filterPairs(trainset)
 
     n_tr = len(trainset)
-    print(f"new training examples: {n_tr}\n")
-
-    print(trainset[0])
-    print(trainset[1])
+    print(f"new training examples: {n_tr}")
 
     tt_x = [tt_decl[i] + " DCNL " + tt_bodies[i] for i in range(n_tt)]
     testset = [[tt_x[i], tt_desc[i]] for i in range(n_tt)]
+    testset = filterPairs(testset)
+    n_tt = len(testset)
+    print(f"new test examples: {n_tt}\n")
 
     vd_x = [vd_decl[i] + " DCNL " + vd_bodies[i] for i in range(n_vd)]
     validset = [[vd_x[i], vd_desc[i]] for i in range(n_vd)]
@@ -227,6 +233,10 @@ if __name__ == "__main__":
 
 
     for pair in trainset:
+        input_lang.addSentence(pair[0])
+        output_lang.addSentence(pair[1])
+
+    for pair in testset:
         input_lang.addSentence(pair[0])
         output_lang.addSentence(pair[1])
 
@@ -243,7 +253,7 @@ if __name__ == "__main__":
         target_tensor = tensorFromSentence(output_lang, pair[1])
         return (input_tensor, target_tensor)
 
-    def get_dataloader(batch_size):
+    def get_dataloader_train(batch_size):
         n = len(trainset)
         input_ids = np.zeros((n, MAX_LENGTH), dtype=np.int32)
         target_ids = np.zeros((n, MAX_LENGTH), dtype=np.int32)
@@ -263,10 +273,30 @@ if __name__ == "__main__":
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=batch_size)
         return input_lang, output_lang, train_dataloader
     
+    def get_dataloader_test(batch_size):
+        n = len(testset)
+        input_ids = np.zeros((n, MAX_LENGTH), dtype=np.int32)
+        target_ids = np.zeros((n, MAX_LENGTH), dtype=np.int32)
+
+        for idx, (inp, tgt) in enumerate(testset):
+            inp_ids = indexesFromSentence(input_lang, inp)
+            tgt_ids = indexesFromSentence(output_lang, tgt)
+            inp_ids.append(EOS_token)
+            tgt_ids.append(EOS_token)
+            input_ids[idx, :len(inp_ids)] = inp_ids
+            target_ids[idx, :len(tgt_ids)] = tgt_ids
+
+        test_data = TensorDataset(torch.LongTensor(input_ids).to(device),
+                                torch.LongTensor(target_ids).to(device))
+
+        test_sampler = RandomSampler(test_data)
+        test_dataloader = DataLoader(test_data, sampler=test_sampler, batch_size=batch_size)
+        return test_dataloader
+    
     def train_epoch(dataloader, encoder, decoder, encoder_optimizer,
           decoder_optimizer, criterion):
         total_loss = 0
-        for data in dataloader:
+        for data in tqdm.tqdm(dataloader, desc="training epoch"):
             input_tensor, target_tensor = data
 
             encoder_optimizer.zero_grad()
@@ -289,43 +319,88 @@ if __name__ == "__main__":
         return total_loss / len(dataloader)
     
 
-    def train(train_dataloader, encoder, decoder, n_epochs, learning_rate=0.001,
-               print_every=100, plot_every=100):
-        plot_losses = []
-        print_loss_total = 0  # Reset every print_every
-        plot_loss_total = 0  # Reset every plot_every
+    def eval_epoch(dataloader, encoder, decoder, criterion):
+
+        total_loss = 0
+        for data in tqdm.tqdm(dataloader, desc="evaluating epoch"):
+            input_tensor, target_tensor = data
+
+            encoder_outputs, encoder_hidden = encoder(input_tensor)
+            decoder_outputs, _, _ = decoder(encoder_outputs, encoder_hidden, target_tensor)
+
+            loss = criterion(
+                decoder_outputs.view(-1, decoder_outputs.size(-1)),
+                target_tensor.view(-1)
+            )
+
+            total_loss += loss.item()
+
+        return total_loss / len(dataloader)
+    
+
+    def train(train_dataloader, test_dataloader, encoder, decoder, n_epochs, learning_rate=0.001):
+        train_losses = []
+        test_losses = []
 
         encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
         decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate)
         criterion = nn.NLLLoss()
 
-        for epoch in tqdm.tqdm(range(1, n_epochs + 1)):
-            loss = train_epoch(train_dataloader, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
-            print_loss_total += loss
-            plot_loss_total += loss
+        for _ in tqdm.tqdm(range(1, n_epochs + 1), desc="epoch"):
+            train_losses.append(train_epoch(train_dataloader, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion))
+            print('done training\n')
+            test_losses.append(eval_epoch(test_dataloader, encoder, decoder, criterion))
 
-            if epoch % print_every == 0:
-                print_loss_avg = print_loss_total / print_every
-                print_loss_total = 0
+            print(f"train: {train_losses[-1]}\n")
+            print(f"test: {test_losses[-1]}\n")
 
-            if epoch % plot_every == 0:
-                plot_loss_avg = plot_loss_total / plot_every
-                plot_losses.append(plot_loss_avg)
-                plot_loss_total = 0
+        print(f"train losses: {train_losses}")
+        print(f"test losses: {test_losses}")
+        showPlot(train_losses, test_losses)
 
-        print(f"losses: {plot_losses}")
-        showPlot(plot_losses)
 
+    def evaluate(encoder, decoder, sentence, input_lang, output_lang):
+        with torch.no_grad():
+            input_tensor = tensorFromSentence(input_lang, sentence)
+
+            encoder_outputs, encoder_hidden = encoder(input_tensor)
+            decoder_outputs, _, decoder_attn = decoder(encoder_outputs, encoder_hidden)
+
+            _, topi = decoder_outputs.topk(1)
+            decoded_ids = topi.squeeze()
+
+            decoded_words = []
+            for idx in decoded_ids:
+                if idx.item() == EOS_token:
+                    decoded_words.append('<EOS>')
+                    break
+                decoded_words.append(output_lang.index2word[idx.item()])
+        return decoded_words, decoder_attn
+    
+    def evaluateRandomly(encoder, decoder, n=10):
+        for _ in range(n):
+            pair = random.choice(trainset)
+            print('>', pair[0])
+            print('=', pair[1])
+            output_words, _ = evaluate(encoder, decoder, pair[0], input_lang, output_lang)
+            output_sentence = ' '.join(output_words)
+            print('<', output_sentence)
+            print('')
 
     hidden_size = 128
-    batch_size = 32
+    batch_size = 128
 
-    input_lang, output_lang, train_dataloader = get_dataloader(batch_size)
+    input_lang, output_lang, train_dataloader = get_dataloader_train(batch_size)
+    test_dataloader = get_dataloader_test(batch_size)
 
     encoder = EncoderRNN(input_lang.n_words, hidden_size).to(device)
     decoder = AttnDecoderRNN(hidden_size, output_lang.n_words).to(device)
 
-    train(train_dataloader, encoder, decoder, EPOCHS, print_every=1, plot_every=1)
+    train(train_dataloader, test_dataloader, encoder, decoder, EPOCHS)
+
+    encoder.eval()
+    decoder.eval()
+    evaluateRandomly(encoder, decoder)
 
 
         
