@@ -1,4 +1,4 @@
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 from ptdata import CodeDataset
 import torch.utils.data as torchdata
 
@@ -57,6 +57,9 @@ def build_hf_dataset(
 def build_pt_dataset(
     descriptions: list, declarations: list, bodies: list, upload=None
 ) -> torchdata.Dataset:
+    """
+    returns a PyTorch dataset based on the lists given.
+    """
     return CodeDataset(bodies, descriptions, declarations)
 
 
