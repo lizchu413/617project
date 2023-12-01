@@ -2,12 +2,13 @@ import datasets
 from collections import defaultdict
 import logging
 import numpy as np
-
+import copy
 
 def extract_parameters(function: str, language: str) -> list:
     """
-    We'll take in the whole string, and perform our own tokenization
-    to parse them
+    Parses and extracts the parameters from a function
+    @param function the function in string representation
+    @param language the language the function was coded in
     """
     result = []
     # string before (, and after (, to get parameters within
@@ -32,47 +33,72 @@ def extract_parameters(function: str, language: str) -> list:
     return result
 
 def get_parameters(examples):
+    """
+    Batched function to get the parameters of a function.
+    @param examples: the examples for our function
+    """
     print(type(examples))
     parameters = []
     for example,lang in zip(examples['func_code_string'], examples['language']):
         parameters.append(extract_parameters(example, lang))
     return {"parameters" : parameters}
 
-
-
-    # we first isolate the parameters by finding the first occurence of 
-    # "(" and ")". we then subset 
-    # from there, we find every occurence of "," and split on it 
-    # then if the language is not type checked we take the first occurence
-    # of each split. otherwise we take the second occurence
-    # we will then use regex to return anything that isn't alphanumeric
-    # and then return the parameters as a list
-
-def extract_answer(documentation_string: str) -> str:
-    line_ends = [".", "\n", ]
-
-
-def convert_to_question(examples : dict, question : str, answer_parser_func, parameters=False):
-    # if the question is based on parameters, we will want to augment the dataset
-    # so we'll do some fancy stuff.
-    # otherwise, simply append the answer
-    questions = [question]*len(examples)
-    answers = []
-    for example in examples["func_documentation_string"]:
-        answer = answer_parser_func(example)
-        answers.append(answer)
-    examples["question"] = questions
-    examples["answers"] = answers
-
-    return examples
-
-
-
-
-
-
-def load_dataset(languages="all"):
+def criteria(example, len_criteria=5, line_criteria=4):
     """
-    loads the dataset.
+    The criteria on whether or not an example is good
+    @param len_criteria minimum number of words in the documentation
+    @param line_criteria exception for code blocks less than this number of lines
+    """
+    num_lines = example["func_code_tokens"].count("\n")
+    doc_len = len(example["func_documentation_tokens"])
+    return not (doc_len < len_criteria and num_lines > line_criteria) 
+
+def generic_question(examples, question, answer_fn):
+    """
+    For a generic question that asks about the overall features of function
+    documentation, generate a response and add to the dataset
+    @param examples the batch we are mapping over
+    @param question the question we want to ask
+    @param answer_fn the function that will answer the question give the parameter
+    """
+    result = dict()
+    # copy the entire dataset
+    for key, value in examples.items():
+        result[key] = copy.deepcopy(value)
+    
+    # add question column to dataset
+    result["question"] = [question]*len(examples)
+
+    answers = []
+    for example in examples['func_documentation_string']:
+        answers.append(answer_fn(question, example))
+    result["answers"] = answers
+
+    return result
+
+def parameter_questions(example, question: str, answer_fn):
+    """
+    For a generic question that asks about the overall features of function
+    documentation, generate a response and add to the dataset
+    @param examples the batch we are currently mapping over
+    @param question a string formatted question that we can insert the parameter into
+    @param answer_fn a function that helps us answer the given question and parameter 
+    """
+
+
+
+def create_dataset(languages="all", upload= None) -> datasets.Dataset:
+    """
+    Loads in the dataset and creates the necessary questions
     """
     dataset = datasets.load_dataset("code_search_net", languages)
+
+    # (0) We want to throw away examples where the documentation is bad
+    dataset = datasets.filter(criteria)
+
+    # (1) find the parameters for each piece of code and store it
+    dataset = datasets.map(get_parameters, batched = True)
+
+    # (2) generate questions 
+
+    
