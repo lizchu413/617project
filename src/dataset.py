@@ -115,13 +115,10 @@ def generate_answer(question: str, context: str):
 
 
 def create_dataset(languages="all", upload=None) -> datasets.Dataset:
-    print(languages)
-    print(upload)
     """
     Loads in the dataset and creates the necessary questions
     """
     logging.info("Loading in dataset...\n")
-    return
     dataset = datasets.load_dataset("code_search_net", languages)
     logging.info(f"Finished loading in dataset. This dataset contains {len(dataset)} entries\n")
 
