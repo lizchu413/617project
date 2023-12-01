@@ -388,7 +388,7 @@ if __name__ == "__main__":
             print('')
 
     hidden_size = 128
-    batch_size = 128
+    batch_size = 32
 
     input_lang, output_lang, train_dataloader = get_dataloader_train(batch_size)
     test_dataloader = get_dataloader_test(batch_size)
