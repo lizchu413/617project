@@ -452,12 +452,13 @@ class Trainer:
 
 def load_train_objs():
     _data = load_dataset("duorc", "SelfRC")
-    train_set = Dataset(_data["train"], tokenizer, parser=DatasetMap.duorc)
-    val_set = Dataset(_data["validation"], tokenizer, parser=DatasetMap.duorc)
 
     model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(T5_MODEL)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+
+    train_set = Dataset(_data["train"], tokenizer, parser=DatasetMap.duorc)
+    val_set = Dataset(_data["validation"], tokenizer, parser=DatasetMap.duorc)
 
     return train_set, val_set, model, tokenizer, optimizer
 
