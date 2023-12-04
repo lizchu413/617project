@@ -26,7 +26,8 @@ def extract_parameters(function: str, language: str) -> list:
     # isolate each parameter
     params = params.split(",")
     # then, we want to find the commas
-    assert(len(params)>= 1)
+    if(len(params) == 1):
+        return result
     # print(params)
     # print("headed to the list")
     for param in params:
@@ -138,7 +139,7 @@ def generate_answer(question: str, doc_string: str, doc_list: list):
     @param doc_string the string version of documentation
     @param doc_list tokenized summary. does not contain param or return
     """
-    split = doc_string.split(" ")
+    split = doc_string.replace("\n", " ").split(" ")
 
     if question == "What does this function do?":
         return doc_list
