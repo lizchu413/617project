@@ -6,6 +6,7 @@ from collections import defaultdict
 import logging
 import copy
 import argparse
+import re
 
 def extract_parameters(function: str, language: str) -> list:
     """
@@ -40,7 +41,6 @@ def get_parameters(examples):
     Batched function to get the parameters of a function.
     @param examples: the examples for our function
     """
-    print(type(examples))
     parameters = []
     for example,lang in zip(examples['func_code_string'], examples['language']):
         parameters.append(extract_parameters(example, lang))
@@ -66,18 +66,17 @@ def generic_question(question: str, answer_fn) -> dict:
     @param answer_fn the function that will answer the question give the parameter
     """
     def inside(examples):
-        result = dict()
-        # copy the entire dataset
-        for key, value in examples.items():
-            result[key] = copy.deepcopy(value)
-        
-        # add question column to dataset
-        result["question"] = [question]*len(examples)
+        keys = examples.keys()
+        result = defaultdict(lambda: list())
+        for i in range(len(examples[keys[0]])):
+            answer = answer_fn(question, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])
+            if answer != None:
+                for key in keys:
+                    result[key].append([key][i])
+                # then, create the question and the answer
+                result["question"].append(question)
+                result["answer"].append(answer)
 
-        answers = []
-        for example in examples['func_documentation_string']:
-            answers.append(answer_fn(question, example))
-        result["answers"] = answers
 
         return result
     return inside
@@ -95,23 +94,56 @@ def parameter_question(question: str, answer_fn) -> dict:
     def inside(examples):
         keys = examples.keys()
         result = defaultdict(lambda: list())
-        for i in range(len(keys[0])):
+        for i in range(len(examples[keys[0]])):
             # for every parameter in the question, create a new entry
             for parameter in examples["parameters"][i]:
+                # attempt to get answer
+                answer = answer_fn(question, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])
+                
+                if answer != None:
                 # make a copy of the existing columns in this row
-                for key in keys:
-                    if key != "parameters":
-                        result[key] = examples[key][i]
-                # then, create the question and the answer
-                result["question"].append(question.format(parameter))
-                result["answer"] = answer_fn(result["question"][-1], result["func_documentation_string"][-1])
+                    for key in keys:
+                        if key != "parameters":
+                            result[key].append(examples[key][i])
+                    # then, create the question and the answer
+                    result["question"].append(question.format(parameter))
+                    result["answer"].append(answer)
+                # don't include if an answer cannot be parsed
         return result
 
     return inside
 
             
-def generate_answer(question: str, context: str):
-    return "dummy"
+def generate_answer(question: str, doc_string: str, doc_list: list):
+    """
+    Generates answer based on the question
+    @param question the question in mind, or parameter in question
+    @param doc_string the string version of documentation
+    @param doc_list tokenized summary. does not contain param or return
+    """
+    split = doc_string.split(" ")
+
+    if question == "What does this function do?":
+        return doc_list
+    if question == "What does this function return?":
+        idxs= [i for i, item in enumerate(split) if re.search("\W*.return[\S]?\W*", item)]
+        if len(idxs != 1):
+            return None
+        # get the subset. we assume that this is at the end of the document.
+        subset = split[idxs[0]+1:]
+        return subset
+    else:
+        idxs = [i for i, item in enumerate(split) if re.search("\W*.param[\S]?\W*", item)]
+        for idx in idxs:
+            if (idx < len(split) - 1) and re.match("((?i){}(?-i)).?".format(question), split[idx + 1]):
+                result = []
+                curr = idx + 2
+                while curr < len(split):
+                    result.append(curr)
+                    if re.match("(\\w+)(?=[.])]", curr):
+                        return result
+                    curr += 1
+        return None
 
 
 def create_dataset(languages="all", upload=None) -> datasets.Dataset:
