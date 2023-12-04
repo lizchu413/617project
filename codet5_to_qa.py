@@ -18,13 +18,15 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 
 ##############
 # PARAMETERS #
 ##############
 
 T5_MODEL = "Salesforce/codet5-small"
-BATCH_SIZE = 16
+BATCH_SIZE = 1
 EPOCHS = 3
 SAVE_EVERY = 1
 LR = 1e-4
@@ -462,13 +464,17 @@ def load_train_objs():
 
     return train_set, val_set, model, tokenizer, optimizer
 
+def wrapper(dataset):
+    def inside(data):
+        return dataset.pack_minibatch(data)
+    return inside
 
 def prepare_dataloader(dataset: Dataset, batch_size: int):
     return DataLoader(
         dataset,
         batch_size=batch_size,
         num_workers=WORKERS,
-        collate_fn=lambda data: dataset.pack_minibatch(data),
+        collate_fn=wrapper(dataset),
         pin_memory=True,
         shuffle=False,
         sampler=DistributedSampler(dataset)
