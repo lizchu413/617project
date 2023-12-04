@@ -118,13 +118,13 @@ def parameter_question(question: str, answer_fn) -> dict:
                 answer = answer_fn(parameter, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])
                 
                 if answer != None:
+                  print(answer)
                 # make a copy of the existing columns in this row
-                    for key in keys:
-                        if key != "parameters":
-                            result[key].append(examples[key][i])
-                    # then, create the question and the answer
-                    result["question"].append(question.format(parameter))
-                    result["answer"].append(answer)
+                  for key in keys:
+                    result[key].append(examples[key][i])
+                  # then, create the question and the answer
+                  result["question"].append(question.format(parameter))
+                  result["answer"].append(answer)
                 # don't include if an answer cannot be parsed
         return result
 
@@ -159,12 +159,15 @@ def generate_answer(question: str, doc_string: str, doc_list: list):
                 result = []
                 curr = idx + 2
                 while curr < len(split):
+                    if re.match("^@", split[curr]) or re.match("^:", split[curr]):
+                      return result
                     result.append(split[curr])
-                    if re.match("(\\w+)(?=[.])]", split[curr]) != None:
+                    if split[curr].endswith(".") or split[curr].endswith("\n"):
                         return result
                     curr += 1
+                if len(result) > 0:
+                  return result
         return None
-
 
 def create_dataset(languages="all", upload=None) -> datasets.Dataset:
     """
