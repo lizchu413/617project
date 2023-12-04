@@ -4,7 +4,7 @@ from tqdm import tqdm
 import torch
 import datasets
 import transformers
-# import evaluate
+import evaluate
 
 from datasets import load_dataset, Dataset
 from transformers import PreTrainedTokenizer, T5ForConditionalGeneration, T5Tokenizer, AdamW, set_seed
@@ -26,7 +26,7 @@ import pandas as pd
 ##############
 
 T5_MODEL = "Salesforce/codet5-small"
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 EPOCHS = 3
 SAVE_EVERY = 1
 LR = 1e-4
@@ -76,11 +76,13 @@ def data_formatter(data):
     return pd.DataFrame(res, columns=['contexts', 'questions', 'answers'])
 
 def format_and_tokenize(data): 
-    print(data['train'])
     train_data, val_data, test_data = data['train'], data['validation'], data['test']
     train_data = Dataset.from_pandas(data_formatter(train_data).dropna())
+    train_data = train_data.select(range(0, 50))
     val_data = Dataset.from_pandas(data_formatter(val_data).dropna())
+    val_data = val_data.select(range(0, 50))
     test_data = Dataset.from_pandas(data_formatter(test_data).dropna())
+    test_data = test_data.select(range(0, 50))
 
     train_tokenized = train_data.map(tokenize_data, batched=True)
     val_tokenized = val_data.map(tokenize_data, batched=True)
@@ -130,6 +132,40 @@ def format_and_tokenize(data):
 #         epoch_train_loss += loss.item() * BATCH_SIZE
 #         return (loss, outputs) if return_outputs else loss
 
+def evaluate(self, predictions, gold_answers):
+        """_summary_
+
+        Args:
+            predictions (_type_): _description_
+            gold_answers (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        f1 = exact_match = 0
+
+        for ground_truths, prediction in tqdm(zip(gold_answers, predictions)):
+            # Remove pad token
+            tokens_to_remove = {
+                self.tokenizer.pad_token_id,
+                self.tokenizer.eos_token_id,
+                self.tokenizer.bos_token_id,
+                self.tokenizer.cls_token_id,
+                self.tokenizer.sep_token_id,
+                self.tokenizer.mask_token_id
+            }
+            prediction = list(filter(lambda token: token not in tokens_to_remove, prediction))
+            ground_truths = list(filter(lambda token: token not in tokens_to_remove, ground_truths))
+            f1 += self.__f1_score(prediction, ground_truths)
+            exact_match += self.__exact_match_score(prediction, ground_truths)
+        return 100*f1/len(predictions), 100*exact_match/len(predictions)
+
+def compute_metrics(p):
+    metric = evaluate.load("seqeval")
+    predictions, labels = p
+    results = metric.compute(predictions=predictions, references=labels)
+    return {"precision": results["overall_precision"], "recall": results["overall_recall"], "f1": results["overall_f1"], "accuracy": results["overall_accuracy"]}
+
 if __name__ == "__main__": 
 
     _data = load_dataset("duorc", "SelfRC")
@@ -138,8 +174,6 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
 
     train_set, val_set, test_set = format_and_tokenize(_data)
-
-    print(train_set[0])
 
     args = TrainingArguments(
         output_dir="codet5-to-qa", 
@@ -157,12 +191,8 @@ if __name__ == "__main__":
         train_dataset=train_set,
         eval_dataset=val_set,
         tokenizer=tokenizer,
+        compute_metrics=compute_metrics,
     )
 
     trainer.train()
     trainer.evaluate()
-
-
-
-
-
