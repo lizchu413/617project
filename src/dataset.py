@@ -4,7 +4,6 @@ File for generating our training dataset for QG/QA Code Summarizations
 import datasets
 from collections import defaultdict
 import logging
-import copy
 import argparse
 import re
 
@@ -14,9 +13,8 @@ def extract_parameters(function: str, language: str) -> list:
     @param function the function in string representation
     @param language the language the function was coded in
     """
-    # print(function)
     result = []
-    # string before (, and after (, to get parameters within
+    # string before ), and after (, to get parameters within
     header = function.split(")")
     if len(header) <= 1:
         logging.warning("Could not find parameters for this function...\n")
@@ -25,14 +23,11 @@ def extract_parameters(function: str, language: str) -> list:
     params = header[0].split("(")[1]
     # isolate each parameter
     params = params.split(",")
-    # then, we want to find the commas
-    if(len(params) == 1):
+    # if no parameters
+    if(params == [""]):
         return result
-    # print(params)
-    # print("headed to the list")
     for param in params:
         param = param.strip() # remove whitespace before and after
-        # print(param)
         # split by white space
         param_feature_list = param.split(" ")
         # java is our only typed language. 
@@ -40,9 +35,12 @@ def extract_parameters(function: str, language: str) -> list:
             ans = (param_feature_list[1])
         else:
             ans = (param_feature_list[0])
+        # language-specific exception
         if language == "python" and ans == "self":
           continue
+        # remove default values
         ans = ans.split("=")[0].strip()
+        # remove special markers (&, *, etc.)
         ans = re.sub(r'[^\w]', '', ans)
         result.append(ans)
     return result
@@ -65,11 +63,11 @@ def criteria(example, len_criteria=5, line_criteria=4):
     @param len_criteria minimum number of words in the documentation
     @param line_criteria exception for code blocks less than this number of lines
     """
-    num_lines = example["func_code_tokens"].count(".")
+    num_lines = max(example["func_code_tokens"].count("."), example["func_code_tokens"].count("\n"))
     doc_len = len(example["func_documentation_tokens"])
     return not (doc_len < len_criteria and num_lines > line_criteria) 
 
-def generic_question(question: str, answer_fn) -> dict:
+def generic_question(question: str, answer_fn):
     """
     For a generic question that asks about the overall features of function
     documentation, generate a response and add to the dataset
@@ -77,13 +75,11 @@ def generic_question(question: str, answer_fn) -> dict:
     @param examples the batch we are mapping over
     @param question the question we want to ask
     @param answer_fn the function that will answer the question give the parameter
+    @answer new rows with question and answer
     """
     def inside(examples):
         keys = list(examples.data.keys())
         result = defaultdict(lambda: list())
-        for key in keys:
-          print(key)
-          print("length of {} is {}".format(key, len(examples[key])))
         for i in range(len(examples[keys[0]])):
             answer = answer_fn(question, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])
             if answer != None:
@@ -92,13 +88,11 @@ def generic_question(question: str, answer_fn) -> dict:
                 # then, create the question and the answer
                 result["question"].append(question)
                 result["answer"].append(answer)
-
-
         return result
     return inside
 
 
-def parameter_question(question: str, answer_fn) -> dict:
+def parameter_question(question: str, answer_fn):
     """
     For a generic question that asks about the overall features of function
     documentation, generate a response and add to the dataset.
@@ -107,6 +101,7 @@ def parameter_question(question: str, answer_fn) -> dict:
     @param example the item we are taking in 
     @param question a string formatted question that we can insert the parameter into
     @param answer_fn a function that helps us answer the given question and parameter 
+    @return new rows with question and answer
     """
     def inside(examples):
         keys = list(examples.data.keys())
@@ -116,14 +111,11 @@ def parameter_question(question: str, answer_fn) -> dict:
             # for every parameter in the question, create a new entry
             for parameter in examples["parameters"][i]:
                 # attempt to get answer
-                answer = answer_fn(parameter, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])
-                
+                answer = answer_fn(parameter, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])      
                 if answer != None:
-                  print(answer)
-                # make a copy of the existing columns in this row
                   for key in keys:
                     result[key].append(examples[key][i])
-                  # then, create the question and the answer
+                  # create the question and the answer
                   result["question"].append(question.format(parameter))
                   result["answer"].append(answer)
                 # don't include if an answer cannot be parsed
@@ -138,11 +130,17 @@ def generate_answer(question: str, doc_string: str, doc_list: list):
     @param question the question in mind, or parameter in question
     @param doc_string the string version of documentation
     @param doc_list tokenized summary. does not contain param or return
+    @return tokenized answer to the question
     """
-    split = doc_string.replace("\n", " ").split(" ")
 
+    # get rid of new lines
+    split = doc_string.replace("\n", " ").split(" ")
+    # CASE 1
     if question == "What does this function do?":
+        # may want to change this because the dataset SUCKS.
         return doc_list
+    
+    # CASE 2
     if question == "What does this function return?":
         idxs= [i for i, item in enumerate(split) if re.search("\W*.return[\S]?\W*", item)]
         if len(idxs) != 1:
@@ -152,13 +150,19 @@ def generate_answer(question: str, doc_string: str, doc_list: list):
         if len(subset) == 0:
           return None
         return subset
+    
+    # CASE 3
     else:
+        # find all special markers of param
         idxs = [i for i, item in enumerate(split) if re.search("\W*.param[\S]?\W*", item)]
+
+        # search to special markers to find the one equal to ours
         for idx in idxs:
             pattern = "{}.?".format(question)
             if (idx < len(split) - 1) and re.match(pattern, split[idx + 1], re.IGNORECASE):
                 result = []
                 curr = idx + 2
+                # read tokens after special marker until EOS or next special marker
                 while curr < len(split):
                     if re.match("^@", split[curr]) or re.match("^:", split[curr]):
                       return result
@@ -189,11 +193,11 @@ def create_dataset(languages="all", upload=None) -> datasets.Dataset:
 
     # (2) generate questions and answers
     logging.info("Generating dataset for first question....\n")
-    do_dataset = dataset.map(generic_question("What does this function do?", generate_answer))
+    do_dataset = dataset.map(generic_question("What does this function do?", generate_answer), batched = True, remove_columns = dataset.column_names)
     logging.info("Generating dataset for second question....\n")
-    param_dataset = dataset.map(parameter_question("What is {}?", generate_answer)) 
+    param_dataset = dataset.map(parameter_question("What is {}?", generate_answer), batched = True, remove_columns = dataset.column_names) 
     logging.info("Generating dataset for third question....\n")
-    return_dataset = dataset.map(generic_question("What does this function return?", generate_answer))
+    return_dataset = dataset.map(generic_question("What does this function return?", generate_answer), batched = True, remove_columns = dataset.column_names)
     
     # (3) concatenate datasets
     logging.info("Concatenating datasets.\n")
