@@ -14,6 +14,7 @@ def extract_parameters(function: str, language: str) -> list:
     @param function the function in string representation
     @param language the language the function was coded in
     """
+    # print(function)
     result = []
     # string before (, and after (, to get parameters within
     header = function.split(")")
@@ -26,15 +27,26 @@ def extract_parameters(function: str, language: str) -> list:
     params = params.split(",")
     # then, we want to find the commas
     assert(len(params)>= 1)
+    # print(params)
+    # print("headed to the list")
     for param in params:
+        param = param.strip() # remove whitespace before and after
+        # print(param)
         # split by white space
         param_feature_list = param.split(" ")
-        # java is our only typed language.
+        # java is our only typed language. 
         if language == "java":
-            result.append(param_feature_list[1])
+            ans = (param_feature_list[1])
         else:
-            result.append(param_feature_list[0])
+            ans = (param_feature_list[0])
+        if language == "python" and ans == "self":
+          continue
+        ans = ans.split("=")[0].strip()
+        ans = re.sub(r'[^\w]', '', ans)
+        result.append(ans)
     return result
+
+
 
 def get_parameters(examples):
     """
@@ -52,7 +64,7 @@ def criteria(example, len_criteria=5, line_criteria=4):
     @param len_criteria minimum number of words in the documentation
     @param line_criteria exception for code blocks less than this number of lines
     """
-    num_lines = example["func_code_tokens"].count("\n")
+    num_lines = example["func_code_tokens"].count(".")
     doc_len = len(example["func_documentation_tokens"])
     return not (doc_len < len_criteria and num_lines > line_criteria) 
 
@@ -66,13 +78,16 @@ def generic_question(question: str, answer_fn) -> dict:
     @param answer_fn the function that will answer the question give the parameter
     """
     def inside(examples):
-        keys = examples.keys()
+        keys = list(examples.data.keys())
         result = defaultdict(lambda: list())
+        for key in keys:
+          print(key)
+          print("length of {} is {}".format(key, len(examples[key])))
         for i in range(len(examples[keys[0]])):
             answer = answer_fn(question, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])
             if answer != None:
                 for key in keys:
-                    result[key].append([key][i])
+                    result[key].append(examples[key][i])
                 # then, create the question and the answer
                 result["question"].append(question)
                 result["answer"].append(answer)
@@ -80,6 +95,7 @@ def generic_question(question: str, answer_fn) -> dict:
 
         return result
     return inside
+
 
 def parameter_question(question: str, answer_fn) -> dict:
     """
@@ -92,13 +108,14 @@ def parameter_question(question: str, answer_fn) -> dict:
     @param answer_fn a function that helps us answer the given question and parameter 
     """
     def inside(examples):
-        keys = examples.keys()
+        keys = list(examples.data.keys())
         result = defaultdict(lambda: list())
+
         for i in range(len(examples[keys[0]])):
             # for every parameter in the question, create a new entry
             for parameter in examples["parameters"][i]:
                 # attempt to get answer
-                answer = answer_fn(question, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])
+                answer = answer_fn(parameter, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])
                 
                 if answer != None:
                 # make a copy of the existing columns in this row
@@ -127,20 +144,23 @@ def generate_answer(question: str, doc_string: str, doc_list: list):
         return doc_list
     if question == "What does this function return?":
         idxs= [i for i, item in enumerate(split) if re.search("\W*.return[\S]?\W*", item)]
-        if len(idxs != 1):
+        if len(idxs) != 1:
             return None
         # get the subset. we assume that this is at the end of the document.
         subset = split[idxs[0]+1:]
+        if len(subset) == 0:
+          return None
         return subset
     else:
         idxs = [i for i, item in enumerate(split) if re.search("\W*.param[\S]?\W*", item)]
         for idx in idxs:
-            if (idx < len(split) - 1) and re.match("((?i){}(?-i)).?".format(question), split[idx + 1]):
+            pattern = "{}.?".format(question)
+            if (idx < len(split) - 1) and re.match(pattern, split[idx + 1], re.IGNORECASE):
                 result = []
                 curr = idx + 2
                 while curr < len(split):
-                    result.append(curr)
-                    if re.match("(\\w+)(?=[.])]", curr):
+                    result.append(split[curr])
+                    if re.match("(\\w+)(?=[.])]", split[curr]) != None:
                         return result
                     curr += 1
         return None
