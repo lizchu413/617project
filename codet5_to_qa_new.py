@@ -20,13 +20,17 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
 import pandas as pd
+import numpy as np
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 
 ##############
 # PARAMETERS #
 ##############
 
 T5_MODEL = "Salesforce/codet5-small"
-BATCH_SIZE = 8
+BATCH_SIZE = 6
 EPOCHS = 3
 SAVE_EVERY = 1
 LR = 1e-4
@@ -78,11 +82,11 @@ def data_formatter(data):
 def format_and_tokenize(data): 
     train_data, val_data, test_data = data['train'], data['validation'], data['test']
     train_data = Dataset.from_pandas(data_formatter(train_data).dropna())
-    train_data = train_data.select(range(0, 50))
+    train_data = train_data.select(range(0, 10000))
     val_data = Dataset.from_pandas(data_formatter(val_data).dropna())
-    val_data = val_data.select(range(0, 50))
+    val_data = val_data.select(range(0, 2000))
     test_data = Dataset.from_pandas(data_formatter(test_data).dropna())
-    test_data = test_data.select(range(0, 50))
+    # test_data = test_data.select(range(0, 50))
 
     train_tokenized = train_data.map(tokenize_data, batched=True)
     val_tokenized = val_data.map(tokenize_data, batched=True)
@@ -132,7 +136,7 @@ def format_and_tokenize(data):
 #         epoch_train_loss += loss.item() * BATCH_SIZE
 #         return (loss, outputs) if return_outputs else loss
 
-def evaluate(self, predictions, gold_answers):
+def evaluate_old(self, predictions, gold_answers):
         """_summary_
 
         Args:
@@ -160,12 +164,52 @@ def evaluate(self, predictions, gold_answers):
             exact_match += self.__exact_match_score(prediction, ground_truths)
         return 100*f1/len(predictions), 100*exact_match/len(predictions)
 
-def compute_metrics(p):
-    metric = evaluate.load("seqeval")
-    predictions, labels = p
-    results = metric.compute(predictions=predictions, references=labels)
-    return {"precision": results["overall_precision"], "recall": results["overall_recall"], "f1": results["overall_f1"], "accuracy": results["overall_accuracy"]}
+def exact_match_score(prediction, ground_truth):
+    if len(ground_truth) == len(prediction):
+        if all(token1 == token2 for token1, token2 in zip(ground_truth,prediction)):
+            return 1
+    return 0
 
+def f1_score(prediction_tokens, ground_truth_tokens):
+    common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
+    num_same = sum(common.values())
+    if num_same == 0:
+        return 0
+    precision = 1.0 * num_same / len(prediction_tokens)
+    recall = 1.0 * num_same / len(ground_truth_tokens)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return f1
+
+def compute_metrics(p):
+    predictions, gold_answers = p
+    if isinstance(predictions, tuple):
+        predictions = predictions[0]
+    predictions = np.argmax(predictions, axis=2)
+    predictions, gold_answers = predictions.tolist(), gold_answers.tolist()
+    # print(f"\nlength of predictions: {len(predictions[0])}, length of gold_answers: {len(gold_answers[0])}")
+    # print(f"\nexample: {predictions[0][0]}")
+    # print(f"\ngold_example: {gold_answers[0][0]}")
+    # print(f"prediction: {predictions[0]}, answer: {gold_answers[0]}")
+    f1 = exact_match = 0
+    tokenizer = AutoTokenizer.from_pretrained(T5_MODEL)
+    for ground_truths, prediction in tqdm(zip(gold_answers, predictions), desc="eval"):
+        # Remove pad token
+        tokens_to_remove = {
+            tokenizer.pad_token_id,
+            tokenizer.eos_token_id,
+            tokenizer.bos_token_id,
+            tokenizer.cls_token_id,
+            tokenizer.sep_token_id,
+            tokenizer.mask_token_id
+        }
+        prediction = list(filter(lambda token: token not in tokens_to_remove, prediction))
+        ground_truths = list(filter(lambda token: token not in tokens_to_remove, ground_truths))
+        f1 += f1_score(prediction, ground_truths)
+        exact_match += exact_match_score(prediction, ground_truths)
+    res = {}
+    res['f1'], res['exact_match'] = f1, exact_match
+    return res
+    
 if __name__ == "__main__": 
 
     _data = load_dataset("duorc", "SelfRC")
@@ -196,3 +240,4 @@ if __name__ == "__main__":
 
     trainer.train()
     trainer.evaluate()
+    trainer.save_model('test_codet5_qa.model')
