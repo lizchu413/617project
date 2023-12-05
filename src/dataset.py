@@ -1,8 +1,7 @@
 """
-File for generating our training dataset for QG/QA Code Summarizations
+File for generating our training dataset for QA Code Summarizations
 """
 import datasets
-from collections import defaultdict
 import logging
 import argparse
 import re
@@ -12,16 +11,18 @@ def extract_parameters(function: str, language: str) -> list:
     Parses and extracts the parameters from a function
     @param function the function in string representation
     @param language the language the function was coded in
+    @return list of parameters for one function
     """
     result = []
     # string before ), and after (, to get parameters within
     header = function.split(")")
     if len(header) <= 1:
-        logging.warning("Could not find parameters for this function...\n")
+        logging.warning(f"Could not find parameters for this {language} function...\n")
         return result
     # get the parameters
     params = header[0].split("(")[1]
     # isolate each parameter
+    params = params.replace(", ", ",")
     params = params.split(",")
     # if no parameters
     if(params == [""]):
@@ -32,7 +33,10 @@ def extract_parameters(function: str, language: str) -> list:
         param_feature_list = param.split(" ")
         # java is our only typed language. 
         if language == "java":
-            ans = (param_feature_list[1])
+            try:
+                ans = (param_feature_list[1])
+            except:
+                return [] # give up
         else:
             ans = (param_feature_list[0])
         # language-specific exception
@@ -45,23 +49,37 @@ def extract_parameters(function: str, language: str) -> list:
         result.append(ans)
     return result
 
+def check_ruby_parameters(function: list) -> bool:
+    """
+    Because Ruby is a stupid language with stupidn rules
+    You don't need to include the parentheses if you don't 
+    have any arguments, so we'll do it here.
+    @param tokenized function
+    @return whether function has no parameters
+    """
+    return function[2] != "("
 
 
-def get_parameters(examples):
+def get_parameters(examples) -> dict:
     """
     Batched function to get the parameters of a function.
     @param examples: the examples for our function
+    @return the parameters of each example
     """
     parameters = []
-    for example,lang in zip(examples['func_code_string'], examples['language']):
-        parameters.append(extract_parameters(example, lang))
+    for i, (example,lang) in enumerate(zip(examples['func_code_string'], examples['language'])):
+        if(lang == "ruby") and check_ruby_parameters(examples['func_code_tokens'][i]):
+            parameters.append([])
+        else:
+            parameters.append(extract_parameters(example, lang))
     return {"parameters" : parameters}
 
-def criteria(example, len_criteria=5, line_criteria=4):
+def criteria(example, len_criteria=5, line_criteria=4)-> bool:
     """
     The criteria on whether or not an example is good
     @param len_criteria minimum number of words in the documentation
     @param line_criteria exception for code blocks less than this number of lines
+    @return whether the example meets the criteria
     """
     num_lines = max(example["func_code_tokens"].count("."), example["func_code_tokens"].count("\n"))
     doc_len = len(example["func_documentation_tokens"])
@@ -77,9 +95,10 @@ def generic_question(question: str, answer_fn):
     @param answer_fn the function that will answer the question give the parameter
     @answer new rows with question and answer
     """
-    def inside(examples):
+    def inside(examples) -> dict:
         keys = list(examples.data.keys())
-        result = defaultdict(lambda: list())
+        res_keys = keys + ["question", "answer"]
+        result = initialize_batch(res_keys)
         for i in range(len(examples[keys[0]])):
             answer = answer_fn(question, examples["func_documentation_string"][i], examples["func_documentation_tokens"][i])
             if answer != None:
@@ -103,10 +122,10 @@ def parameter_question(question: str, answer_fn):
     @param answer_fn a function that helps us answer the given question and parameter 
     @return new rows with question and answer
     """
-    def inside(examples):
+    def inside(examples) -> dict:
         keys = list(examples.data.keys())
-        result = defaultdict(lambda: list())
-
+        res_keys = keys + ["question", "answer"]
+        result = initialize_batch(res_keys)
         for i in range(len(examples[keys[0]])):
             # for every parameter in the question, create a new entry
             for parameter in examples["parameters"][i]:
@@ -124,7 +143,7 @@ def parameter_question(question: str, answer_fn):
     return inside
 
             
-def generate_answer(question: str, doc_string: str, doc_list: list):
+def generate_answer(question: str, doc_string: str, doc_list: list)->list:
     """
     Generates answer based on the question
     @param question the question in mind, or parameter in question
@@ -173,35 +192,53 @@ def generate_answer(question: str, doc_string: str, doc_list: list):
                 if len(result) > 0:
                   return result
         return None
+    
+def initialize_batch(keys)-> dict:
+    """
+    Initializes an empty batch
+    @param keys the columns of the batch
+    @return the resulting empty batch
+    """
+    result = dict()
+    for key in keys:
+        result[key] = []
+    return result
 
 def create_dataset(languages="all", upload=None) -> datasets.Dataset:
     """
     Loads in the dataset and creates the necessary questions
+    @param languages language to upload from the huggingface dataset
+    @param upload url of upload repository or None
+    @return the dataset
     """
     logging.info("Loading in dataset...\n")
     dataset = datasets.load_dataset("code_search_net", languages)
-    logging.info(f"Finished loading in dataset. This dataset contains {len(dataset)} entries\n")
+    logging.info(f"Finished loading in dataset. This dataset contains {dataset.shape} entries\n")
 
     # (0) We want to throw away examples where the documentation is bad
-    dataset = datasets.filter(criteria)
-    logging.info(f"Finished filtering dataset for bad examples. This dataset now contains {len(dataset)} entries\n")
+    dataset = dataset.filter(criteria)
+    logging.info(f"Finished filtering dataset for bad examples. This dataset now contains {dataset.shape} entries\n")
 
     logging.info("Now parsing out the parameters of each function...\n")
     # (1) find the parameters for each piece of code and store it
-    dataset = datasets.map(get_parameters, batched = True)
+    dataset = dataset.map(get_parameters, batched = True)
     logging.info("Finished parsing.")
 
     # (2) generate questions and answers
     logging.info("Generating dataset for first question....\n")
-    do_dataset = dataset.map(generic_question("What does this function do?", generate_answer), batched = True, remove_columns = dataset.column_names)
+    do_dataset = dataset.map(generic_question("What does this function do?", generate_answer), batched = True, remove_columns = dataset['train'].column_names)
     logging.info("Generating dataset for second question....\n")
-    param_dataset = dataset.map(parameter_question("What is {}?", generate_answer), batched = True, remove_columns = dataset.column_names) 
+    param_dataset = dataset.map(parameter_question("What is {}?", generate_answer), batched = True, remove_columns = dataset['train'].column_names) 
     logging.info("Generating dataset for third question....\n")
-    return_dataset = dataset.map(generic_question("What does this function return?", generate_answer), batched = True, remove_columns = dataset.column_names)
+    return_dataset = dataset.map(generic_question("What does this function return?", generate_answer), batched = True, remove_columns = dataset['train'].column_names)
     
     # (3) concatenate datasets
     logging.info("Concatenating datasets.\n")
-    complete_dataset = datasets.concatenate_datasets([do_dataset, param_dataset, return_dataset])
+    dataset_list = [do_dataset, param_dataset, return_dataset]
+    complete_dataset = datasets.DatasetDict()
+    for key in ["train", "test", "validation"]:
+        complete_dataset[key] = datasets.concatenate_datasets([ddd[key] for ddd in dataset_list])
+    # complete_dataset = datasets.concatenate_datasets([do_dataset, param_dataset, return_dataset])
 
     # (4) upload to hub
     if upload != None:
