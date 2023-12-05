@@ -4,19 +4,12 @@ from tqdm import tqdm
 import torch
 import datasets
 import transformers
+import evaluate
 
 from datasets import load_dataset, Dataset
-from transformers import PreTrainedTokenizer, T5ForConditionalGeneration, T5Tokenizer, AdamW, set_seed
-from torch.utils.data import DataLoader
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, TrainingArguments, Trainer
 
-from typing import List, Tuple
 from collections import Counter
-
-import torch.multiprocessing as mp
-from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
 import os
 import pandas as pd
 import numpy as np
@@ -29,7 +22,7 @@ torch.cuda.empty_cache()
 # PARAMETERS #
 ##############
 
-T5_MODEL = "Salesforce/codet5p-220m"
+T5_MODEL = "Salesforce/codet5-small"
 BATCH_SIZE = 8
 EPOCHS = 3
 SAVE_EVERY = 1
@@ -44,6 +37,14 @@ SEED = 617
 ###################
 
 tokenizer = AutoTokenizer.from_pretrained(T5_MODEL)
+tokens_to_remove = {
+                    tokenizer.pad_token_id,
+                    tokenizer.eos_token_id,
+                    tokenizer.bos_token_id,
+                    tokenizer.cls_token_id,
+                    tokenizer.sep_token_id,
+                    tokenizer.mask_token_id
+                    }
 
 def tokenize_data(data): 
     contexts, questions, answers = data['contexts'], data['questions'], data['answers']
@@ -78,10 +79,6 @@ def data_formatter(data):
     counter = 0
     for row in tqdm(data):
         res.append([(' '.join(row['func_code_tokens'])), row['question'], (' '.join(row['answer']))])
-        # if counter == 0: 
-        #     print(row)
-        #     print("==== res ====")
-        #     print(res)
         counter += 1
     return pd.DataFrame(res, columns=['contexts', 'questions', 'answers'])
 
@@ -100,12 +97,6 @@ def format_and_tokenize(data):
     test_tokenized = test_data.map(tokenize_data, batched=True)
     return train_tokenized, val_tokenized, test_tokenized
 
-def exact_match_score(prediction, ground_truth):
-    if len(ground_truth) == len(prediction):
-        if all(token1 == token2 for token1, token2 in zip(ground_truth,prediction)):
-            return 1
-    return 0
-
 def f1_score(prediction_tokens, ground_truth_tokens):
     common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
     num_same = sum(common.values())
@@ -116,49 +107,39 @@ def f1_score(prediction_tokens, ground_truth_tokens):
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
 
-def compute_metrics(p, tokens_to_remove):
+def compute_metrics(p):
     predictions, gold_answers = p
     if isinstance(predictions, tuple):
         predictions = predictions[0]
     predictions = np.argmax(predictions, axis=2)
     predictions, gold_answers = predictions.tolist(), gold_answers.tolist()
-    f1 = exact_match = 0
+    f1 = 0
     for ground_truths, prediction in tqdm(zip(gold_answers, predictions), desc="eval"):
         prediction = list(filter(lambda token: token not in tokens_to_remove, prediction))
         ground_truths = list(filter(lambda token: token not in tokens_to_remove, ground_truths))
         f1 += f1_score(prediction, ground_truths)
-        exact_match += exact_match_score(prediction, ground_truths)
-    res = {}
-    res['f1'], res['exact_match'] = f1, exact_match
-    return res
+    return {'f1': f1/len(predictions)}
     
 if __name__ == "__main__": 
 
     _data = load_dataset("aalexchengg/codesearchnet_qa", streaming = True)
     model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL, trust_remote_code=True)
 
-    tokens_to_remove = {
-            tokenizer.pad_token_id,
-            tokenizer.eos_token_id,
-            tokenizer.bos_token_id,
-            tokenizer.cls_token_id,
-            tokenizer.sep_token_id,
-            tokenizer.mask_token_id
-        }
+    out_file = open('model_output.txt', 'a')
 
     train_set, val_set, test_set = format_and_tokenize(_data)
 
     args = TrainingArguments(
         output_dir="codet5-to-qa", 
         evaluation_strategy="epoch",
+        logging_strategy="epoch",
         save_strategy="epoch",
         learning_rate=LR,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
         num_train_epochs=EPOCHS,
         load_best_model_at_end=True,
-        eval_accumulation_steps=1,
-        fp16 = True
+        # fp16 = True
     )
 
     trainer = Trainer(
@@ -166,9 +147,28 @@ if __name__ == "__main__":
         args=args,
         train_dataset=train_set,
         eval_dataset=val_set,
-        tokenizer=tokenizer
+        tokenizer=tokenizer, 
+        compute_metrics=compute_metrics,
     )
 
     trainer.train()
     trainer.evaluate()
     trainer.save_model('test_codet5_qa.model')
+    print(trainer.state.log_history)
+
+    train_losses, test_losses, test_f1s = [], [], []
+
+    for i in range(len(trainer.state.log_history)): 
+        vals = trainer.state.log_history[i]
+        if 'loss' in vals: 
+            train_losses.append(trainer.state.log_history[i]['loss'])
+        if 'eval_loss' in vals: 
+            test_losses.append(trainer.state.log_history[i]['eval_loss'])
+        if 'eval_f1' in vals: 
+            test_f1s.append(trainer.state.log_history[i]['eval_f1'])
+
+    out_file.write("train losses: " + str(train_losses) + "\n")
+    out_file.write("test losses: " + str(test_losses) + "\n")
+    out_file.write("test f1s: " + str(test_f1s) + "\n")
+
+    out_file.close()
