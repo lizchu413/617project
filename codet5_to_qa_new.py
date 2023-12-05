@@ -22,28 +22,30 @@ import pandas as pd
 import numpy as np
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 torch.cuda.empty_cache()
 
 ##############
 # PARAMETERS #
 ##############
 
-T5_MODEL = "Salesforce/codet5-small"
-BATCH_SIZE = 32
+T5_MODEL = "Salesforce/codet5p-220m"
+BATCH_SIZE = 8
 EPOCHS = 3
 SAVE_EVERY = 1
 LR = 1e-4
 WORKERS = 2
 DEVICE = "cuda"
-MAX_INPUT_LENGTH = 512
+MAX_INPUT_LENGTH = 120
 SEED = 617
 
 ###################
 # DATA PROCESSING #
 ###################
 
-def tokenize_data(data, tokenizer): 
+tokenizer = AutoTokenizer.from_pretrained(T5_MODEL)
+
+def tokenize_data(data): 
     contexts, questions, answers = data['contexts'], data['questions'], data['answers']
     answers = [''.join(ele) for ele in answers]
     inputs = list(map(lambda tuple: f"question:{tuple[0]}  context:{tuple[1]}", zip(questions,contexts)))
@@ -76,27 +78,27 @@ def data_formatter(data):
     counter = 0
     for row in tqdm(data):
         res.append([(' '.join(row['func_code_tokens'])), row['question'], (' '.join(row['answer']))])
-        if counter == 0: 
-            print(row)
-            print("==== res ====")
-            print(res)
+        # if counter == 0: 
+        #     print(row)
+        #     print("==== res ====")
+        #     print(res)
         counter += 1
     return pd.DataFrame(res, columns=['contexts', 'questions', 'answers'])
 
-def format_and_tokenize(data, tokenizer): 
+def format_and_tokenize(data): 
+    data = data.filter(lambda x : x["question"] == "What does this function do?")
     train_data, val_data, test_data = data['train'], data['validation'], data['test']
-    train_data = train_data.select(range(0, 10000))
+    train_data = train_data.take(10000)
     train_data = Dataset.from_pandas(data_formatter(train_data).dropna())
-    val_data = val_data.select(range(0, 2000))
+    val_data = val_data.take(2000)
     val_data = Dataset.from_pandas(data_formatter(val_data).dropna())
-    test_data = test_data.select(range(0, 2000))
+    test_data = test_data.take(2000)
     test_data = Dataset.from_pandas(data_formatter(test_data).dropna())
 
-    train_tokenized = train_data.map(lambda x: tokenize_data(x, tokenizer), batched=True)
-    val_tokenized = val_data.map(lambda x: tokenize_data(x, tokenizer), batched=True)
-    test_tokenized = test_data.map(lambda x: tokenize_data(x, tokenizer), batched=True)
+    train_tokenized = train_data.map(tokenize_data, batched=True)
+    val_tokenized = val_data.map(tokenize_data, batched=True)
+    test_tokenized = test_data.map(tokenize_data, batched=True)
     return train_tokenized, val_tokenized, test_tokenized
-
 
 def exact_match_score(prediction, ground_truth):
     if len(ground_truth) == len(prediction):
@@ -114,7 +116,7 @@ def f1_score(prediction_tokens, ground_truth_tokens):
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
 
-def compute_metrics(p, tokenizer):
+def compute_metrics(p, tokens_to_remove):
     predictions, gold_answers = p
     if isinstance(predictions, tuple):
         predictions = predictions[0]
@@ -122,15 +124,6 @@ def compute_metrics(p, tokenizer):
     predictions, gold_answers = predictions.tolist(), gold_answers.tolist()
     f1 = exact_match = 0
     for ground_truths, prediction in tqdm(zip(gold_answers, predictions), desc="eval"):
-        # Remove pad token
-        tokens_to_remove = {
-            tokenizer.pad_token_id,
-            tokenizer.eos_token_id,
-            tokenizer.bos_token_id,
-            tokenizer.cls_token_id,
-            tokenizer.sep_token_id,
-            tokenizer.mask_token_id
-        }
         prediction = list(filter(lambda token: token not in tokens_to_remove, prediction))
         ground_truths = list(filter(lambda token: token not in tokens_to_remove, ground_truths))
         f1 += f1_score(prediction, ground_truths)
@@ -141,11 +134,19 @@ def compute_metrics(p, tokenizer):
     
 if __name__ == "__main__": 
 
-    _data = load_dataset("aalexchengg/codesearchnet_qa")
+    _data = load_dataset("aalexchengg/codesearchnet_qa", streaming = True)
     model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(T5_MODEL)
 
-    train_set, val_set, test_set = format_and_tokenize(_data, tokenizer)
+    tokens_to_remove = {
+            tokenizer.pad_token_id,
+            tokenizer.eos_token_id,
+            tokenizer.bos_token_id,
+            tokenizer.cls_token_id,
+            tokenizer.sep_token_id,
+            tokenizer.mask_token_id
+        }
+
+    train_set, val_set, test_set = format_and_tokenize(_data)
 
     args = TrainingArguments(
         output_dir="codet5-to-qa", 
@@ -155,6 +156,9 @@ if __name__ == "__main__":
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
         num_train_epochs=EPOCHS,
+        load_best_model_at_end=True,
+        eval_accumulation_steps=1,
+        fp16 = True
     )
 
     trainer = Trainer(
@@ -162,8 +166,7 @@ if __name__ == "__main__":
         args=args,
         train_dataset=train_set,
         eval_dataset=val_set,
-        tokenizer=tokenizer,
-        compute_metrics=lambda x: compute_metrics(x, tokenizer),
+        tokenizer=tokenizer
     )
 
     trainer.train()
