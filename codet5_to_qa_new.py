@@ -22,7 +22,7 @@ torch.cuda.empty_cache()
 # PARAMETERS #
 ##############
 
-T5_MODEL = "Salesforce/codet5-small"
+T5_MODEL = "Salesforce/codet5p-220m"
 BATCH_SIZE = 8
 EPOCHS = 3
 SAVE_EVERY = 1
@@ -82,14 +82,13 @@ def data_formatter(data):
         counter += 1
     return pd.DataFrame(res, columns=['contexts', 'questions', 'answers'])
 
-def format_and_tokenize(data): 
-    data = data.filter(lambda x : x["question"] == "What does this function do?")
+def format_and_tokenize(data, num_train=10000, num_val = 2000, num_test=2000): 
     train_data, val_data, test_data = data['train'], data['validation'], data['test']
-    train_data = train_data.take(10000)
+    train_data = train_data.take(num_train)
     train_data = Dataset.from_pandas(data_formatter(train_data).dropna())
-    val_data = val_data.take(2000)
+    val_data = val_data.take(num_val)
     val_data = Dataset.from_pandas(data_formatter(val_data).dropna())
-    test_data = test_data.take(2000)
+    test_data = test_data.take(num_test)
     test_data = Dataset.from_pandas(data_formatter(test_data).dropna())
 
     train_tokenized = train_data.map(tokenize_data, batched=True)
@@ -119,41 +118,23 @@ def compute_metrics(p):
         ground_truths = list(filter(lambda token: token not in tokens_to_remove, ground_truths))
         f1 += f1_score(prediction, ground_truths)
     return {'f1': f1/len(predictions)}
-    
-if __name__ == "__main__": 
 
-    _data = load_dataset("aalexchengg/codesearchnet_qa", streaming = True)
-    model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL, trust_remote_code=True)
 
-    out_file = open('model_output.txt', 'a')
+def train(model, tokenizer, train_set, val_set, args, model_out, loss_out):
 
-    train_set, val_set, test_set = format_and_tokenize(_data)
-
-    args = TrainingArguments(
-        output_dir="codet5-to-qa", 
-        evaluation_strategy="epoch",
-        logging_strategy="epoch",
-        save_strategy="epoch",
-        learning_rate=LR,
-        per_device_train_batch_size=BATCH_SIZE,
-        per_device_eval_batch_size=BATCH_SIZE,
-        num_train_epochs=EPOCHS,
-        load_best_model_at_end=True,
-        # fp16 = True
-    )
-
+    out_file = open(loss_out, 'a')
     trainer = Trainer(
         model=model, 
         args=args,
         train_dataset=train_set,
         eval_dataset=val_set,
         tokenizer=tokenizer, 
-        compute_metrics=compute_metrics,
+        compute_metrics=compute_metrics
     )
 
     trainer.train()
     trainer.evaluate()
-    trainer.save_model('test_codet5_qa.model')
+    trainer.save_model(model_out)
     print(trainer.state.log_history)
 
     train_losses, test_losses, test_f1s = [], [], []
@@ -172,3 +153,60 @@ if __name__ == "__main__":
     out_file.write("test f1s: " + str(test_f1s) + "\n")
 
     out_file.close()
+
+    
+if __name__ == "__main__": 
+
+    _data = load_dataset("aalexchengg/codesearchnet_qa")
+    model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL, trust_remote_code=True)
+
+
+    # out_file = open('model_output.txt', 'a')
+
+    train_set, val_set, test_set = format_and_tokenize(_data)
+
+    args = TrainingArguments(
+        output_dir="codet5-to-qa", 
+        evaluation_strategy="epoch",
+        logging_strategy="epoch",
+        save_strategy="epoch",
+        learning_rate=LR,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE,
+        num_train_epochs=EPOCHS,
+        load_best_model_at_end=True,
+        fp16 = True
+    )
+
+    train(model, tokenizer, train_set, val_set, "original.model", "model_output.txt")
+
+    # trainer = Trainer(
+    #     model=model, 
+    #     args=args,
+    #     train_dataset=train_set,
+    #     eval_dataset=val_set,
+    #     tokenizer=tokenizer, 
+    #     compute_metrics=compute_metrics
+    # )
+
+    # trainer.train()
+    # trainer.evaluate()
+    # trainer.save_model('test_codet5_qa.model')
+    # print(trainer.state.log_history)
+
+    # train_losses, test_losses, test_f1s = [], [], []
+
+    # for i in range(len(trainer.state.log_history)): 
+    #     vals = trainer.state.log_history[i]
+    #     if 'loss' in vals: 
+    #         train_losses.append(trainer.state.log_history[i]['loss'])
+    #     if 'eval_loss' in vals: 
+    #         test_losses.append(trainer.state.log_history[i]['eval_loss'])
+    #     if 'eval_f1' in vals: 
+    #         test_f1s.append(trainer.state.log_history[i]['eval_f1'])
+
+    # out_file.write("train losses: " + str(train_losses) + "\n")
+    # out_file.write("test losses: " + str(test_losses) + "\n")
+    # out_file.write("test f1s: " + str(test_f1s) + "\n")
+
+    # out_file.close()
