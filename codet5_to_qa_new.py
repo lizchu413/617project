@@ -120,8 +120,7 @@ def compute_metrics(p):
     return {'f1': f1/len(predictions)}
 
 
-def train(model, tokenizer, train_set, val_set, args, model_out, loss_out):
-
+def train(model, tokenizer, train_set, val_set, test_set, args, model_out, loss_out):
     out_file = open(loss_out, 'a')
     trainer = Trainer(
         model=model, 
@@ -138,6 +137,7 @@ def train(model, tokenizer, train_set, val_set, args, model_out, loss_out):
     print(trainer.state.log_history)
 
     train_losses, test_losses, test_f1s = [], [], []
+    preds = []
 
     for i in range(len(trainer.state.log_history)): 
         vals = trainer.state.log_history[i]
@@ -160,7 +160,6 @@ if __name__ == "__main__":
     _data = load_dataset("aalexchengg/codesearchnet_qa")
     model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL, trust_remote_code=True)
 
-
     # out_file = open('model_output.txt', 'a')
 
     train_set, val_set, test_set = format_and_tokenize(_data)
@@ -175,7 +174,7 @@ if __name__ == "__main__":
         per_device_eval_batch_size=BATCH_SIZE,
         num_train_epochs=EPOCHS,
         load_best_model_at_end=True,
-        fp16 = True
+        # fp16 = True
     )
 
     train(model, tokenizer, train_set, val_set, "original.model", "model_output.txt")

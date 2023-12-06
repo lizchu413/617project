@@ -2,6 +2,10 @@ import os, re, csv
 import tqdm
 from pathlib import Path
 from dataclasses import dataclass
+from tqdm import tqdm
+from collections import Counter
+import torch
+from torcheval.metrics.functional import multiclass_f1_score
 
 # code taken from
 # https://pytorch.org/tutorials/intermediate/seq2seq_translation_tutorial.html
@@ -11,7 +15,8 @@ import torch.nn as nn
 from torch import optim
 import torch.nn.functional as F
 import random
-
+from datasets import load_dataset, Dataset
+import pandas as pd
 import numpy as np
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 
@@ -37,8 +42,8 @@ def showPlot(train, test):
 seed = 10617
 np.random.seed(seed)
 
-MAX_LENGTH = 50
-EPOCHS = 10
+MAX_LENGTH = 120
+EPOCHS = 2
 
 SOS_token = 0
 EOS_token = 1
@@ -194,17 +199,46 @@ def data():
             train_decl, test_decl, valid_decl, 
             train_bodies, test_bodies, valid_bodies)
 
+
+def data_formatter(data): 
+    res = []
+    counter = 0
+    for row in tqdm(data):
+        res.append([(' '.join(row['func_code_tokens'])), row['question'], (' '.join(row['answer']))])
+        counter += 1
+    return pd.DataFrame(res, columns=['contexts', 'questions', 'answers'])
+
 if __name__ == "__main__":
 
-    (tr_desc, tt_desc, vd_desc, 
-     tr_decl, tt_decl, vd_decl, 
-     tr_bodies, tt_bodies, vd_bodies) = data()
-    n_tr, n_vd, n_tt = len(tr_desc), len(vd_desc), len(tt_desc)
-    print(f"training examples: {n_tr}; validation examples: {n_vd}, test examples: {n_tt}\n")
+    # (tr_desc, tt_desc, vd_desc, 
+    #  tr_decl, tt_decl, vd_decl, 
+    #  tr_bodies, tt_bodies, vd_bodies) = data()
+    # n_tr, n_vd, n_tt = len(tr_desc), len(vd_desc), len(tt_desc)
+    # print(f"training examples: {n_tr}; validation examples: {n_vd}, test examples: {n_tt}\n")
 
-    tr_x = [tr_decl[i] + " DCNL " + tr_bodies[i] for i in range(n_tr)]
-    trainset = [[tr_x[i], tr_desc[i]] for i in range(n_tr)]
+    # tr_x = [tr_decl[i] + " DCNL " + tr_bodies[i] for i in range(n_tr)]
+    # trainset = [[tr_x[i], tr_desc[i]] for i in range(n_tr)]
     # filter out really long examples
+
+    _data = load_dataset("aalexchengg/codesearchnet_qa", streaming=True)
+    train_data = _data['train'].take(8000)
+    val_data = _data['validation'].take(200)
+    test_data = _data['test'].take(200)
+    train_data = Dataset.from_pandas(data_formatter(train_data).dropna())
+    val_data = Dataset.from_pandas(data_formatter(val_data).dropna())
+    test_data = Dataset.from_pandas(data_formatter(test_data).dropna())
+
+    trainset = []
+    for dat in train_data: 
+        trainset.append(["question: " + dat['questions'] + " context: " + dat['contexts'], dat['answers']])
+
+    validset = []
+    for dat in val_data: 
+        validset.append(["question: " + dat['questions'] + " context: " + dat['contexts'], dat['answers']])
+
+    testset = []
+    for dat in test_data: 
+        testset.append(["question: " + dat['questions'] + " context: " + dat['contexts'], dat['answers']])
 
     def filterPair(p):
         return len(p[0].split(' ')) < MAX_LENGTH and \
@@ -214,23 +248,32 @@ if __name__ == "__main__":
         return [pair for pair in pairs if filterPair(pair)]
         
     trainset = filterPairs(trainset)
-
+    trainset = trainset[:4000]
+    print(f"length of trainset: {len(trainset)}")
     n_tr = len(trainset)
-    print(f"new training examples: {n_tr}")
+    # print(f"new training examples: {n_tr}")
 
-    tt_x = [tt_decl[i] + " DCNL " + tt_bodies[i] for i in range(n_tt)]
-    testset = [[tt_x[i], tt_desc[i]] for i in range(n_tt)]
+    # tt_x = [tt_decl[i] + " DCNL " + tt_bodies[i] for i in range(n_tt)]
+    # testset = [[tt_x[i], tt_desc[i]] for i in range(n_tt)]
     testset = filterPairs(testset)
+    testset = testset[:100]
+    print(f"length of testset: {len(testset)}")
     n_tt = len(testset)
-    print(f"new test examples: {n_tt}\n")
+    # print(f"new test examples: {n_tt}\n")
 
-    vd_x = [vd_decl[i] + " DCNL " + vd_bodies[i] for i in range(n_vd)]
-    validset = [[vd_x[i], vd_desc[i]] for i in range(n_vd)]
+    # vd_x = [vd_decl[i] + " DCNL " + vd_bodies[i] for i in range(n_vd)]
+    # validset = [[vd_x[i], vd_desc[i]] for i in range(n_vd)]
+
+    input_lang = Lang("questions")
+    output_lang = Lang("answers")
 
 
-    input_lang = Lang("code")
-    output_lang = Lang("desc")
-
+    print("== train set example ==\n")
+    print(trainset[0])
+    # print("== valid set example ==\n")
+    # print(validset[0])
+    print("== test set example ==\n")
+    print(testset[0])
 
     for pair in trainset:
         input_lang.addSentence(pair[0])
@@ -296,7 +339,7 @@ if __name__ == "__main__":
     def train_epoch(dataloader, encoder, decoder, encoder_optimizer,
           decoder_optimizer, criterion):
         total_loss = 0
-        for data in tqdm.tqdm(dataloader, desc="training epoch"):
+        for data in tqdm(dataloader, desc="training epoch"):
             input_tensor, target_tensor = data
 
             encoder_optimizer.zero_grad()
@@ -322,7 +365,7 @@ if __name__ == "__main__":
     def eval_epoch(dataloader, encoder, decoder, criterion):
 
         total_loss = 0
-        for data in tqdm.tqdm(dataloader, desc="evaluating epoch"):
+        for data in tqdm(dataloader, desc="evaluating epoch"):
             input_tensor, target_tensor = data
 
             encoder_outputs, encoder_hidden = encoder(input_tensor)
@@ -332,27 +375,80 @@ if __name__ == "__main__":
                 decoder_outputs.view(-1, decoder_outputs.size(-1)),
                 target_tensor.view(-1)
             )
-
             total_loss += loss.item()
 
         return total_loss / len(dataloader)
     
+    def eval_f1(dataloader, encoder, decoder, criterion):
+
+        f1 = 0
+        count = 0
+        for data in tqdm(dataloader, desc="evaluating epoch"):
+            input_tensor, target_tensor = data
+
+            encoder_outputs, encoder_hidden = encoder(input_tensor)
+            decoder_outputs, _, _ = decoder(encoder_outputs, encoder_hidden, target_tensor)
+            for target, pred in zip(target_tensor, decoder_outputs): 
+                n_class = pred.shape[1]
+                print("===\nhello\n===\n")
+                print(target.shape)
+                print(pred.shape)
+                print((pred.argmax(axis=0)).shape)
+                f1 += multiclass_f1_score(pred, target, num_classes=n_class)
+                count += 1
+
+
+            # print(decoder_outputs.shape)
+            # print(multiclass_f1_score(target_tensor.view(-1), 
+            #                decoder_outputs.view(-1, decoder_outputs.size(-1))))
+            # f1 += multiclass_f1_score(target_tensor.view(-1), 
+                        #    decoder_outputs.view(-1, decoder_outputs.size(-1)))
+            # loss = criterion(
+            #     decoder_outputs.view(-1, decoder_outputs.size(-1)),
+            #     target_tensor.view(-1)
+            # )
+            # predictions = decoder_outputs.argmax(axis=2)
+            # predictions = list(filter(lambda token: token not in {0, 1}, predictions))
+            # ground_truths = list(filter(lambda token: token not in {0, 1}, target_tensor.tolist()))
+            # print("\ndecoder outputs")
+            # print(predictions[0])
+            # print("\ntarget tensor")
+            # print(target_tensor[0])
+
+            # f1 += f1_score(predictions, ground_truths)
+
+        return f1 / count
+    
+    
+    # def f1_score(prediction_tokens, ground_truth_tokens):
+    #     common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
+    #     num_same = sum(common.values())
+    #     if num_same == 0:
+    #         return 0
+    #     precision = 1.0 * num_same / len(prediction_tokens)
+    #     recall = 1.0 * num_same / len(ground_truth_tokens)
+    #     f1 = (2 * precision * recall) / (precision + recall)
+    #     return f1
 
     def train(train_dataloader, test_dataloader, encoder, decoder, n_epochs, learning_rate=0.001):
         train_losses = []
         test_losses = []
+        test_f1s = []
 
         encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
         decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate)
         criterion = nn.NLLLoss()
 
-        for _ in tqdm.tqdm(range(1, n_epochs + 1), desc="epoch"):
+        for _ in tqdm(range(1, n_epochs + 1), desc="epoch"):
             train_losses.append(train_epoch(train_dataloader, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion))
             print('done training\n')
             test_losses.append(eval_epoch(test_dataloader, encoder, decoder, criterion))
+            test_f1s.append(eval_f1(test_dataloader, encoder, decoder, criterion))
 
             print(f"train: {train_losses[-1]}\n")
             print(f"test: {test_losses[-1]}\n")
+            print(f"f1: {test_f1s[-1]}")
+
 
         print(f"train losses: {train_losses}")
         print(f"test losses: {test_losses}")
@@ -380,11 +476,11 @@ if __name__ == "__main__":
     def evaluateRandomly(encoder, decoder, n=10):
         for _ in range(n):
             pair = random.choice(trainset)
-            print('>', pair[0])
-            print('=', pair[1])
+            print('\nGIVEN', pair[0])
+            print('\nANSWER', pair[1])
             output_words, _ = evaluate(encoder, decoder, pair[0], input_lang, output_lang)
             output_sentence = ' '.join(output_words)
-            print('<', output_sentence)
+            print('\nPREDICTION', output_sentence)
             print('')
 
     hidden_size = 128
